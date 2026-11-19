@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Snake — Browser Edition</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #0d0d12;
+      color: #f3f4f6;
+      font-family: "Consolas", "Courier New", monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 16px;
+      user-select: none;
+    }
+    .game-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    canvas {
+      background-color: #121218;
+      border: 2px solid #282838;
+      border-radius: 8px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    .controls-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      max-width: 640px;
+    }
+    button {
+      background: #1e1e2a;
+      color: #f3f4f6;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover {
+      background: #2b2b3c;
+      border-color: #34d399;
+    }
+    button.primary {
+      background: #10b981;
+      color: #0b1116;
+      font-weight: bold;
+      border-color: #34d399;
+    }
+    button.primary:hover {
+      background: #34d399;
+    }
+    .hint {
+      color: #9ca3af;
+      font-size: 13px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-wrapper">
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <div class="controls-bar">
+      <button id="btnMode">[G] Mode</button>
+      <button id="btnDiff">[&larr;/&rarr;] Difficulty</button>
+      <button id="btnObs">[O] Obstacles</button>
+      <button id="btnWrap">[T] Portals</button>
+      <button id="btnSound">[M] Sound</button>
+      <button id="btnStart" class="primary">[Enter] Start / Restart</button>
+    </div>
+    <p class="hint">
+      1P: WASD or Arrow Keys &nbsp;|&nbsp; 2P: P1 WASD vs P2 Arrows &nbsp;|&nbsp; P: Pause &nbsp;|&nbsp; Esc: Menu
+    </p>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // --- Configuration ---
+    const WINDOW_WIDTH = 640;
+    const WINDOW_HEIGHT = 480;
+    const CELL_SIZE = 20;
+    const COLS = WINDOW_WIDTH / CELL_SIZE;
+    const ROWS = WINDOW_HEIGHT / CELL_SIZE;
+
+    const DIFFICULTIES = {
+      Easy: {
+        fps: 9,
+        speedStep: 0.15,
+        obstacles: 6,
+        aiBlunder: 0.28,
+        aiFloodLimit: 0,
+        aiPredictP1: false,
+        aiChaseGold: false,
+      },
+      Medium: {
+        fps: 13,
+        speedStep: 0.25,
+        obstacles: 14,
+        aiBlunder: 0.08,
+        aiFloodLimit: 20,
+        aiPredictP1: true,
+        aiChaseGold: true,
+      },
+      Hard: {
+        fps: 18,
+        speedStep: 0.40,
+        obstacles: 24,
+        aiBlunder: 0.0,
+        aiFloodLimit: 60,
+        aiPredictP1: true,
+        aiChaseGold: true,
+      },
+    };
+    const DIFFICULTY_ORDER = ["Easy", "Medium", "Hard"];
+    const GAME_MODES = ["1P Solo", "2P Local (WASD vs Arrows)", "1P vs AI Bot"];
+
+    const GOLDEN_POINTS = 30;
+    const GOLDEN_DURATION_MS = 6000;
+    const GOLDEN_SPAWN_CHANCE = 0.35;
+
+    const COLORS = {
+      bg: "#121218",
+      grid: "#1c1c26",
+      portal: "#a855f7",
+      p1Head: "#34d399",
+      p1Body: "#10b981",
+      p2Head: "#38bdf8",
+      p2Body: "#0284c7",
+      food: "#f43f5e",
+      golden: "#facc15",
+      obstacle: "#64748b",
+      text: "#f3f4f6",
+      subtext: "#9ca3af",
+    };
+
+    // --- Web Audio API Procedural Sound Synthesizer ---
+    class SoundFX {
+      constructor() {
+        this.enabled = true;
+        this.ctx = null;
+      }
+      _ensureCtx() {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (AudioCtx) this.ctx = new AudioCtx();
+        }
+        if (this.ctx && this.ctx.state === "suspended") {
+          this.ctx.resume();
+        }
+      }
+      _tone(freqStart, freqEnd, duration, type = "square", gainPeak = 0.08) {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        if (!this.ctx) return;
+
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+
+        osc.type = type;
+        osc.frequency.setValueAtTime(freqStart, now);
+        osc.frequency.linearRampToValueAtTime(freqEnd, now + duration);
+
+        gain.gain.setValueAtTime(gainPeak, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + duration);
+      }
+      play(name) {
+        if (name === "eat") this._tone(520, 880, 0.09, "square", 0.07);
+        else if (name === "golden") this._tone(660, 1320, 0.18, "square", 0.09);
+        else if (name === "crash") this._tone(220, 55, 0.35, "sawtooth", 0.1);
+        else if (name === "menu") this._tone(440, 440, 0.05, "square", 0.05);
+      }
+    }
+    const sfx = new SoundFX();
+
+    // --- Persistence ---
+    function loadHighScores() {
+      try {
+        const raw = localStorage.getItem("snake_high_scores");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          return {
+            Easy: Number(parsed.Easy) || 0,
+            Medium: Number(parsed.Medium) || 0,
+            Hard: Number(parsed.Hard) || 0,
+          };
+        }
+      } catch (_) {}
+      return { Easy: 0, Medium: 0, Hard: 0 };
+    }
+    function saveHighScores(scores) {
+      try {
+        localStorage.setItem("snake_high_scores", JSON.stringify(scores));
+      } catch (_) {}
+    }
+    const highScores = loadHighScores();
+
+    // --- Helpers ---
+    const keyOf = (x, y) => `${x},${y}`;
+
+    function getRandomFreeCell(occupiedSet) {
+      while (true) {
+        const x = Math.floor(Math.random() * COLS) * CELL_SIZE;
+        const y = Math.floor(Math.random() * ROWS) * CELL_SIZE;
+        if (!occupiedSet.has(keyOf(x, y))) {
+          return { x, y };
+        }
+      }
+    }
+
+    function generateObstacles(count, safeSet) {
+      const obs = [];
+      const occupied = new Set(safeSet);
+      for (let i = 0; i < count; i++) {
+        const cell = getRandomFreeCell(occupied);
+        obs.push(cell);
+        occupied.add(keyOf(cell.x, cell.y));
+      }
+      return obs;
+    }
+
+    function gridDistance(a, b, wrapEnabled) {
+      let dx = Math.abs(a.x - b.x);
+      let dy = Math.abs(a.y - b.y);
+      if (wrapEnabled) {
+        dx = Math.min(dx, WINDOW_WIDTH - dx);
+        dy = Math.min(dy, WINDOW_HEIGHT - dy);
+      }
+      return (dx + dy) / CELL_SIZE;
+    }
+
+    function countReachableSpace(start, blockedSet, wrapEnabled, limit) {
+      const visited = new Set([keyOf(start.x, start.y)]);
+      const queue = [start];
+      let headIdx = 0;
+
+      const dirs = [
+        { dx: 0, dy: -CELL_SIZE },
+        { dx: 0, dy: CELL_SIZE },
+        { dx: -CELL_SIZE, dy: 0 },
+        { dx: CELL_SIZE, dy: 0 },
+      ];
+
+      while (headIdx < queue.length && visited.size < limit) {
+        const cur = queue[headIdx++];
+        for (const d of dirs) {
+          let nx = cur.x + d.dx;
+          let ny = cur.y + d.dy;
+          if (wrapEnabled) {
+            nx = (nx + WINDOW_WIDTH) % WINDOW_WIDTH;
+            ny = (ny + WINDOW_HEIGHT) % WINDOW_HEIGHT;
+          } else if (nx < 0 || nx >= WINDOW_WIDTH || ny < 0 || ny >= WINDOW_HEIGHT) {
+            continue;
+          }
+          const k = keyOf(nx, ny);
+          if (!blockedSet.has(k) && !visited.has(k)) {
+            visited.add(k);
+            queue.push({ x: nx, y: ny });
+          }
+        }
+      }
+      return visited.size;
+    }
+
+    function getAiDirection(aiSnake, currentDir, p1Snake, p1NextDir, obstacles, food, goldenFood, wrapEnabled, cfg) {
+      const head = aiSnake[0];
+      const allDirs = [
+        { dx: 0, dy: -CELL_SIZE },
+        { dx: 0, dy: CELL_SIZE },
+        { dx: -CELL_SIZE, dy: 0 },
+        { dx: CELL_SIZE, dy: 0 },
+      ];
+      const candidates = allDirs.filter(
+        (d) => !(d.dx === -currentDir.dx && d.dy === -currentDir.dy)
+      );
+
+      const blocked = new Set();
+      obstacles.forEach((o) => blocked.add(keyOf(o.x, o.y)));
+      for (let i = 0; i < aiSnake.length - 1; i++) blocked.add(keyOf(aiSnake[i].x, aiSnake[i].y));
+      for (let i = 0; i < p1Snake.length - 1; i++) blocked.add(keyOf(p1Snake[i].x, p1Snake[i].y));
+
+      const validMoves = [];
+      for (const d of candidates) {
+        let nx = head.x + d.dx;
+        let ny = head.y + d.dy;
+        if (wrapEnabled) {
+          nx = (nx + WINDOW_WIDTH) % WINDOW_WIDTH;
+          ny = (ny + WINDOW_HEIGHT) % WINDOW_HEIGHT;
+        } else if (nx < 0 || nx >= WINDOW_WIDTH || ny < 0 || ny >= WINDOW_HEIGHT) {
+          continue;
+        }
+        if (!blocked.has(keyOf(nx, ny))) {
+          validMoves.push({ dir: d, next: { x: nx, y: ny } });
+        }
+      }
+
+      if (validMoves.length === 0) return currentDir;
+
+      if (Math.random() < cfg.aiBlunder) {
+        return validMoves[Math.floor(Math.random() * validMoves.length)].dir;
+      }
+
+      let p1Pred = null;
+      if (cfg.aiPredictP1) {
+        let px = p1Snake[0].x + p1NextDir.dx;
+        let py = p1Snake[0].y + p1NextDir.dy;
+        if (wrapEnabled) {
+          px = (px + WINDOW_WIDTH) % WINDOW_WIDTH;
+          py = (py + WINDOW_HEIGHT) % WINDOW_HEIGHT;
+        }
+        p1Pred = { x: px, y: py };
+      }
+
+      let target = food;
+      if (cfg.aiChaseGold && goldenFood !== null) {
+        const distGold = gridDistance(head, goldenFood, wrapEnabled);
+        const distFood = gridDistance(head, food, wrapEnabled);
+        if (distGold <= distFood + 8) target = goldenFood;
+      }
+
+      const scored = validMoves.map(({ dir, next }) => {
+        const dist = gridDistance(next, target, wrapEnabled);
+        let score = -dist * 10;
+
+        if (cfg.aiFloodLimit > 0) {
+          const openCells = countReachableSpace(next, blocked, wrapEnabled, cfg.aiFloodLimit);
+          const minSafe = Math.min(aiSnake.length, cfg.aiFloodLimit);
+          if (openCells < minSafe) score -= 500;
+          else score += openCells;
+        }
+
+        if (p1Pred && next.x === p1Pred.x && next.y === p1Pred.y) {
+          score -= 350;
+        }
+
+        return { score, dir };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      return scored[0].dir;
+    }
+
+    // --- Game State ---
+    let state = "MENU"; // "MENU", "PLAYING", "PAUSED", "GAME_OVER"
+    let diffIdx = 1;
+    let modeIdx = 0;
+    let obstaclesEnabled = true;
+    let wrapEnabled = false;
+
+    let p1Snake = [];
+    let p1Dir = { dx: CELL_SIZE, dy: 0 };
+    let p1NextDir = { dx: CELL_SIZE, dy: 0 };
+    let p1Score = 0;
+
+    let p2Snake = [];
+    let p2Dir = { dx: -CELL_SIZE, dy: 0 };
+    let p2NextDir = { dx: -CELL_SIZE, dy: 0 };
+    let p2Score = 0;
+
+    let obstacles = [];
+    let food = { x: 0, y: 0 };
+    let goldenFood = null;
+    let goldenExpiresAt = 0;
+    let pauseStartedAt = 0;
+
+    let currentFps = 13;
+    let outcomeText = "";
+    let lastTickTime = 0;
+
+    function startGame() {
+      const diffName = DIFFICULTY_ORDER[diffIdx];
+      const cfg = DIFFICULTIES[diffName];
+      const twoSnakeMode = modeIdx === 1 || modeIdx === 2;
+      const safeSet = new Set();
+
+      if (twoSnakeMode) {
+        const p1x = Math.floor(WINDOW_WIDTH / 4 / CELL_SIZE) * CELL_SIZE;
+        const p1y = Math.floor(WINDOW_HEIGHT / 3 / CELL_SIZE) * CELL_SIZE;
+        p1Snake = [
+          { x: p1x, y: p1y },
+          { x: p1x - CELL_SIZE, y: p1y },
+          { x: p1x - 2 * CELL_SIZE, y: p1y },
+        ];
+        p1Dir = { dx: CELL_SIZE, dy: 0 };
+        p1NextDir = { dx: CELL_SIZE, dy: 0 };
+
+        const p2x = Math.floor((WINDOW_WIDTH * 3) / 4 / CELL_SIZE) * CELL_SIZE;
+        const p2y = Math.floor((WINDOW_HEIGHT * 2) / 3 / CELL_SIZE) * CELL_SIZE;
+        p2Snake = [
+          { x: p2x, y: p2y },
+          { x: p2x + CELL_SIZE, y: p2y },
+          { x: p2x + 2 * CELL_SIZE, y: p2y },
+        ];
+        p2Dir = { dx: -CELL_SIZE, dy: 0 };
+        p2NextDir = { dx: -CELL_SIZE, dy: 0 };
+
+        p1Snake.forEach((s) => safeSet.add(keyOf(s.x, s.y)));
+        p2Snake.forEach((s) => safeSet.add(keyOf(s.x, s.y)));
+        for (let step = 1; step < 7; step++) {
+          safeSet.add(keyOf((p1x + step * CELL_SIZE) % WINDOW_WIDTH, p1y));
+          safeSet.add(keyOf((p2x - step * CELL_SIZE + WINDOW_WIDTH) % WINDOW_WIDTH, p2y));
+        }
+      } else {
+        const sx = Math.floor(WINDOW_WIDTH / 2 / CELL_SIZE) * CELL_SIZE;
+        const sy = Math.floor(WINDOW_HEIGHT / 2 / CELL_SIZE) * CELL_SIZE;
+        p1Snake = [
+          { x: sx, y: sy },
+          { x: sx - CELL_SIZE, y: sy },
+          { x: sx - 2 * CELL_SIZE, y: sy },
+        ];
+        p1Dir = { dx: CELL_SIZE, dy: 0 };
+        p1NextDir = { dx: CELL_SIZE, dy: 0 };
+        p2Snake = [];
+
+        p1Snake.forEach((s) => safeSet.add(keyOf(s.x, s.y)));
+        for (let step = 1; step < 7; step++) {
+          safeSet.add(keyOf((sx + step * CELL_SIZE) % WINDOW_WIDTH, sy));
+        }
+      }
+
+      p1Score = 0;
+      p2Score = 0;
+      obstacles = obstaclesEnabled ? generateObstacles(cfg.obstacles, safeSet) : [];
+
+      const occupied = new Set();
+      p1Snake.forEach((s) => occupied.add(keyOf(s.x, s.y)));
+      p2Snake.forEach((s) => occupied.add(keyOf(s.x, s.y)));
+      obstacles.forEach((o) => occupied.add(keyOf(o.x, o.y)));
+
+      food = getRandomFreeCell(occupied);
+      goldenFood = null;
+      goldenExpiresAt = 0;
+      currentFps = cfg.fps;
+      outcomeText = "";
+      state = "PLAYING";
+      lastTickTime = performance.now();
+    }
+
+    // --- Input Handling ---
+    window.addEventListener("keydown", (e) => {
+      const now = performance.now();
+      const k = e.key.toLowerCase();
+
+      if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k)) {
+        e.preventDefault();
+      }
+
+      if (k === "escape") {
+        if (state !== "MENU") {
+          state = "MENU";
+          sfx.play("menu");
+        }
+        return;
+      }
+
+      if (k === "m") {
+        sfx.enabled = !sfx.enabled;
+        sfx.play("menu");
+        return;
+      }
+
+      if (state === "MENU") {
+        if (k === "arrowleft" || k === "a") {
+          diffIdx = (diffIdx - 1 + DIFFICULTY_ORDER.length) % DIFFICULTY_ORDER.length;
+          sfx.play("menu");
+        } else if (k === "arrowright" || k === "d") {
+          diffIdx = (diffIdx + 1) % DIFFICULTY_ORDER.length;
+          sfx.play("menu");
+        } else if (k === "g") {
+          modeIdx = (modeIdx + 1) % GAME_MODES.length;
+          sfx.play("menu");
+        } else if (k === "o") {
+          obstaclesEnabled = !obstaclesEnabled;
+          sfx.play("menu");
+        } else if (k === "t") {
+          wrapEnabled = !wrapEnabled;
+          sfx.play("menu");
+        } else if (k === "enter" || k === " ") {
+          sfx.play("menu");
+          startGame();
+        }
+        return;
+      }
+
+      if (state === "PAUSED") {
+        if (k === "p") {
+          if (goldenFood !== null) goldenExpiresAt += now - pauseStartedAt;
+          state = "PLAYING";
+          lastTickTime = now;
+          sfx.play("menu");
+        }
+        return;
+      }
+
+      if (state === "GAME_OVER") {
+        if (k === "r" || k === " " || k === "enter") {
+          sfx.play("menu");
+          startGame();
+        }
+        return;
+      }
+
+      if (state === "PLAYING") {
+        if (k === "p") {
+          pauseStartedAt = now;
+          state = "PAUSED";
+          sfx.play("menu");
+          return;
+        }
+
+        const useArrowsP1 = modeIdx !== 1;
+        if ((k === "w" || (useArrowsP1 && k === "arrowup")) && p1Dir.dy !== CELL_SIZE) {
+          p1NextDir = { dx: 0, dy: -CELL_SIZE };
+        } else if ((k === "s" || (useArrowsP1 && k === "arrowdown")) && p1Dir.dy !== -CELL_SIZE) {
+          p1NextDir = { dx: 0, dy: CELL_SIZE };
+        } else if ((k === "a" || (useArrowsP1 && k === "arrowleft")) && p1Dir.dx !== CELL_SIZE) {
+          p1NextDir = { dx: -CELL_SIZE, dy: 0 };
+        } else if ((k === "d" || (useArrowsP1 && k === "arrowright")) && p1Dir.dx !== -CELL_SIZE) {
+          p1NextDir = { dx: CELL_SIZE, dy: 0 };
+        }
+
+        if (modeIdx === 1) {
+          if (k === "arrowup" && p2Dir.dy !== CELL_SIZE) p2NextDir = { dx: 0, dy: -CELL_SIZE };
+          else if (k === "arrowdown" && p2Dir.dy !== -CELL_SIZE) p2NextDir = { dx: 0, dy: CELL_SIZE };
+          else if (k === "arrowleft" && p2Dir.dx !== CELL_SIZE) p2NextDir = { dx: -CELL_SIZE, dy: 0 };
+          else if (k === "arrowright" && p2Dir.dx !== -CELL_SIZE) p2NextDir = { dx: CELL_SIZE, dy: 0 };
+        }
+      }
+    });
+
+    // Toolbar buttons for mouse/touch convenience
+    document.getElementById("btnMode").onclick = () => {
+      modeIdx = (modeIdx + 1) % GAME_MODES.length;
+      sfx.play("menu");
+      if (state !== "MENU") startGame();
+    };
+    document.getElementById("btnDiff").onclick = () => {
+      diffIdx = (diffIdx + 1) % DIFFICULTY_ORDER.length;
+      sfx.play("menu");
+      if (state !== "MENU") startGame();
+    };
+    document.getElementById("btnObs").onclick = () => {
+      obstaclesEnabled = !obstaclesEnabled;
+      sfx.play("menu");
+      if (state !== "MENU") startGame();
+    };
+    document.getElementById("btnWrap").onclick = () => {
+      wrapEnabled = !wrapEnabled;
+      sfx.play("menu");
+    };
+    document.getElementById("btnSound").onclick = () => {
+      sfx.enabled = !sfx.enabled;
+      sfx.play("menu");
+    };
+    document.getElementById("btnStart").onclick = () => {
+      sfx.play("menu");
+      startGame();
+    };
+
+    // --- Simulation Tick ---
+    function update(now) {
+      if (state !== "PLAYING") return;
+
+      const diffName = DIFFICULTY_ORDER[diffIdx];
+      const cfg = DIFFICULTIES[diffName];
+      const twoSnakeMode = modeIdx === 1 || modeIdx === 2;
+      const aiEnabled = modeIdx === 2;
+
+      if (goldenFood !== null && now >= goldenExpiresAt) {
+        goldenFood = null;
+      }
+
+      p1Dir = p1NextDir;
+      let p1x = p1Snake[0].x + p1Dir.dx;
+      let p1y = p1Snake[0].y + p1Dir.dy;
+      if (wrapEnabled) {
+        p1x = (p1x + WINDOW_WIDTH) % WINDOW_WIDTH;
+        p1y = (p1y + WINDOW_HEIGHT) % WINDOW_HEIGHT;
+      }
+      const p1Head = { x: p1x, y: p1y };
+
+      let p2Head = { x: -999, y: -999 };
+      if (twoSnakeMode) {
+        if (aiEnabled) {
+          p2NextDir = getAiDirection(
+            p2Snake, p2Dir, p1Snake, p1Dir, obstacles, food, goldenFood, wrapEnabled, cfg
+          );
+        }
+        p2Dir = p2NextDir;
+        let p2x = p2Snake[0].x + p2Dir.dx;
+        let p2y = p2Snake[0].y + p2Dir.dy;
+        if (wrapEnabled) {
+          p2x = (p2x + WINDOW_WIDTH) % WINDOW_WIDTH;
+          p2y = (p2y + WINDOW_HEIGHT) % WINDOW_HEIGHT;
+        }
+        p2Head = { x: p2x, y: p2y };
+      }
+
+      const hitsHazard = (h) => {
+        const out = !wrapEnabled && (h.x < 0 || h.x >= WINDOW_WIDTH || h.y < 0 || h.y >= WINDOW_HEIGHT);
+        const hitObs = obstacles.some((o) => o.x === h.x && o.y === h.y);
+        return out || hitObs;
+      };
+      const inSnake = (h, snake) => snake.some((s) => s.x === h.x && s.y === h.y);
+
+      let p1Dead = hitsHazard(p1Head) || inSnake(p1Head, p1Snake) || (twoSnakeMode && inSnake(p1Head, p2Snake));
+      let p2Dead = twoSnakeMode && (hitsHazard(p2Head) || inSnake(p2Head, p2Snake) || inSnake(p2Head, p1Snake));
+
+      if (twoSnakeMode && p1Head.x === p2Head.x && p1Head.y === p2Head.y) {
+        p1Dead = true;
+        p2Dead = true;
+      }
+
+      if (p1Dead || p2Dead) {
+        state = "GAME_OVER";
+        sfx.play("crash");
+        if (!twoSnakeMode) {
+          outcomeText = "GAME OVER";
+          if (p1Score > highScores[diffName]) {
+            highScores[diffName] = p1Score;
+            saveHighScores(highScores);
+          }
+        } else {
+          const p2Win = aiEnabled ? `AI (${diffName}) WINS!` : "PLAYER 2 WINS!";
+          if (p1Dead && p2Dead) outcomeText = "DRAW!";
+          else if (p2Dead) outcomeText = "PLAYER 1 WINS!";
+          else outcomeText = p2Win;
+        }
+        return;
+      }
+
+      let ateRegular = false;
+      p1Snake.unshift(p1Head);
+      if (p1Head.x === food.x && p1Head.y === food.y) {
+        p1Score += 10;
+        ateRegular = true;
+      } else {
+        p1Snake.pop();
+      }
+
+      if (goldenFood && p1Head.x === goldenFood.x && p1Head.y === goldenFood.y) {
+        p1Score += GOLDEN_POINTS;
+        goldenFood = null;
+        sfx.play("golden");
+      }
+
+      if (twoSnakeMode) {
+        p2Snake.unshift(p2Head);
+        if (p2Head.x === food.x && p2Head.y === food.y) {
+          p2Score += 10;
+          ateRegular = true;
+        } else {
+          p2Snake.pop();
+        }
+
+        if (goldenFood && p2Head.x === goldenFood.x && p2Head.y === goldenFood.y) {
+          p2Score += GOLDEN_POINTS;
+          goldenFood = null;
+          sfx.play("golden");
+        }
+      }
+
+      if (ateRegular) {
+        currentFps += cfg.speedStep;
+        sfx.play("eat");
+        const occupied = new Set();
+        p1Snake.forEach((s) => occupied.add(keyOf(s.x, s.y)));
+        p2Snake.forEach((s) => occupied.add(keyOf(s.x, s.y)));
+        obstacles.forEach((o) => occupied.add(keyOf(o.x, o.y)));
+        if (goldenFood) occupied.add(keyOf(goldenFood.x, goldenFood.y));
+
+        food = getRandomFreeCell(occupied);
+
+        if (goldenFood === null && Math.random() < GOLDEN_SPAWN_CHANCE) {
+          occupied.add(keyOf(food.x, food.y));
+          goldenFood = getRandomFreeCell(occupied);
+          goldenExpiresAt = now + GOLDEN_DURATION_MS;
+        }
+      }
+    }
+
+    // --- Rendering ---
+    function drawRoundedRect(x, y, w, h, r, color) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+      ctx.fill();
+    }
+
+    function drawCenteredText(text, y, font, color) {
+      ctx.font = font;
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, WINDOW_WIDTH / 2, y);
+    }
+
+    function render(now) {
+      const diffName = DIFFICULTY_ORDER[diffIdx];
+      const twoSnakeMode = modeIdx === 1 || modeIdx === 2;
+      const aiEnabled = modeIdx === 2;
+
+      ctx.fillStyle = COLORS.bg;
+      ctx.fillRect(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+
+      // Grid lines
+      ctx.strokeStyle = COLORS.grid;
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= WINDOW_WIDTH; x += CELL_SIZE) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, WINDOW_HEIGHT);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= WINDOW_HEIGHT; y += CELL_SIZE) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(WINDOW_WIDTH, y);
+        ctx.stroke();
+      }
+
+      // Dashed purple portal borders
+      if (wrapEnabled && state !== "MENU") {
+        ctx.strokeStyle = COLORS.portal;
+        ctx.lineWidth = 4;
+        ctx.setLineDash([CELL_SIZE, CELL_SIZE]);
+        ctx.strokeRect(2, 2, WINDOW_WIDTH - 4, WINDOW_HEIGHT - 4);
+        ctx.setLineDash([]);
+      }
+
+      if (state === "MENU") {
+        drawCenteredText("PYTHON SNAKE", 72, "bold 38px Consolas, monospace", COLORS.p1Head);
+        drawCenteredText(
+          `[G] Mode: ${GAME_MODES[modeIdx]}`,
+          148,
+          "bold 21px Consolas, monospace",
+          twoSnakeMode ? COLORS.p2Head : COLORS.text
+        );
+        drawCenteredText(
+          `Difficulty: < ${diffName} >`,
+          194,
+          "bold 21px Consolas, monospace",
+          COLORS.golden
+        );
+        drawCenteredText(
+          `[O] Wall Obstacles: ${obstaclesEnabled ? "ON" : "OFF"}`,
+          240,
+          "bold 21px Consolas, monospace",
+          COLORS.text
+        );
+        drawCenteredText(
+          `[T] Screen Wrap: ${wrapEnabled ? "ON (Portals)" : "OFF (Solid Walls)"}`,
+          286,
+          "bold 21px Consolas, monospace",
+          wrapEnabled ? COLORS.portal : COLORS.text
+        );
+        drawCenteredText(
+          `[M] Sound FX: ${sfx.enabled ? "ON" : "MUTED"}`,
+          330,
+          "16px Consolas, monospace",
+          COLORS.subtext
+        );
+        if (!twoSnakeMode) {
+          drawCenteredText(
+            `Best (${diffName}): ${highScores[diffName]}`,
+            360,
+            "16px Consolas, monospace",
+            COLORS.subtext
+          );
+        }
+        drawCenteredText(
+          "Press ENTER or SPACE to Start",
+          418,
+          "bold 22px Consolas, monospace",
+          COLORS.p1Body
+        );
+        return;
+      }
+
+      // Obstacles
+      for (const o of obstacles) {
+        drawRoundedRect(o.x + 1, o.y + 1, CELL_SIZE - 2, CELL_SIZE - 2, 3, COLORS.obstacle);
+      }
+
+      // Regular Food
+      drawRoundedRect(food.x + 2, food.y + 2, CELL_SIZE - 4, CELL_SIZE - 4, 6, COLORS.food);
+
+      // Golden Apple + Timer Bar
+      if (goldenFood !== null) {
+        const remaining = Math.max(0, (goldenExpiresAt - now) / GOLDEN_DURATION_MS);
+        const pulse = Math.floor(now / 150) % 2 === 0 ? 1 : 2;
+        drawRoundedRect(
+          goldenFood.x + pulse,
+          goldenFood.y + pulse,
+          CELL_SIZE - pulse * 2,
+          CELL_SIZE - pulse * 2,
+          8,
+          COLORS.golden
+        );
+
+        const barW = 140;
+        const barH = 8;
+        const barX = (WINDOW_WIDTH - barW) / 2;
+        const barY = 14;
+        drawRoundedRect(barX, barY, barW, barH, 4, COLORS.grid);
+        drawRoundedRect(barX, barY, barW * remaining, barH, 4, COLORS.golden);
+      }
+
+      // Player 1 Snake
+      p1Snake.forEach((seg, idx) => {
+        drawRoundedRect(
+          seg.x + 1,
+          seg.y + 1,
+          CELL_SIZE - 2,
+          CELL_SIZE - 2,
+          4,
+          idx === 0 ? COLORS.p1Head : COLORS.p1Body
+        );
+      });
+
+      // Player 2 / AI Snake
+      if (twoSnakeMode) {
+        p2Snake.forEach((seg, idx) => {
+          drawRoundedRect(
+            seg.x + 1,
+            seg.y + 1,
+            CELL_SIZE - 2,
+            CELL_SIZE - 2,
+            4,
+            idx === 0 ? COLORS.p2Head : COLORS.p2Body
+          );
+        });
+      }
+
+      // HUD
+      ctx.textBaseline = "top";
+      if (twoSnakeMode) {
+        const p2Tag = aiEnabled ? `AI (${diffName})` : "P2";
+        ctx.font = "bold 22px Consolas, monospace";
+        ctx.fillStyle = COLORS.p1Head;
+        ctx.textAlign = "left";
+        ctx.fillText(`P1: ${p1Score}`, 14, 10);
+
+        ctx.fillStyle = COLORS.p2Head;
+        ctx.textAlign = "right";
+        ctx.fillText(`${p2Tag}: ${p2Score}`, WINDOW_WIDTH - 14, 10);
+      } else {
+        ctx.font = "bold 22px Consolas, monospace";
+        ctx.fillStyle = COLORS.text;
+        ctx.textAlign = "left";
+        ctx.fillText(`Score: ${p1Score}`, 14, 10);
+
+        ctx.font = "16px Consolas, monospace";
+        ctx.fillStyle = COLORS.subtext;
+        ctx.fillText(`Best (${diffName}): ${highScores[diffName]}`, 14, 36);
+
+        ctx.textAlign = "right";
+        ctx.fillText(`Speed: ${currentFps.toFixed(1)}x`, WINDOW_WIDTH - 14, 14);
+      }
+
+      if (state === "PAUSED") {
+        drawCenteredText("PAUSED", WINDOW_HEIGHT / 2, "bold 38px Consolas, monospace", COLORS.text);
+      } else if (state === "GAME_OVER") {
+        drawCenteredText(
+          outcomeText,
+          WINDOW_HEIGHT / 2 - 22,
+          "bold 38px Consolas, monospace",
+          twoSnakeMode ? COLORS.golden : COLORS.food
+        );
+        drawCenteredText(
+          "Press R / SPACE to Retry  |  ESC for Menu",
+          WINDOW_HEIGHT / 2 + 24,
+          "16px Consolas, monospace",
+          COLORS.text
+        );
+      }
+    }
+
+    function loop(now) {
+      const tickInterval = state === "PLAYING" ? 1000 / currentFps : 1000 / 30;
+      if (now - lastTickTime >= tickInterval) {
+        update(now);
+        lastTickTime = now;
+      }
+      render(now);
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
