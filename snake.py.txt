@@ -1,0 +1,9 @@
+snake-game/
+├── .github/
+│   └── workflows/
+│       └── lint.yml
+├── .gitignore
+├── LICENSE
+├── README.md
+├── requirements.txt
+└── snake.py
